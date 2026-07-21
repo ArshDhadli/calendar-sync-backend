@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using SyncBackend.Api.Auth;
 using SyncBackend.Api.Contracts;
 using SyncBackend.Api.Data;
 using SyncBackend.Api.Entities;
@@ -8,7 +9,7 @@ using SyncBackend.Api.Entities;
 namespace SyncBackend.Api.Controllers;
 
 /// <summary>
-/// Authentication endpoints. Phase 1 starts with registration; login + JWT come next.
+/// Authentication endpoints: register an account, then log in to receive a JWT.
 /// </summary>
 [ApiController]
 [Route("auth")]
@@ -16,12 +17,17 @@ public class AuthController : ControllerBase
 {
     private readonly AppDbContext _db;
     private readonly IPasswordHasher<User> _passwordHasher;
+    private readonly JwtTokenService _tokenService;
 
-    // Both dependencies are supplied by the DI container we configured in Program.cs.
-    public AuthController(AppDbContext db, IPasswordHasher<User> passwordHasher)
+    // All three dependencies are supplied by the DI container configured in Program.cs.
+    public AuthController(
+        AppDbContext db,
+        IPasswordHasher<User> passwordHasher,
+        JwtTokenService tokenService)
     {
         _db = db;
         _passwordHasher = passwordHasher;
+        _tokenService = tokenService;
     }
 
     /// <summary>
@@ -61,5 +67,34 @@ public class AuthController : ControllerBase
             id = user.Id,
             email = user.Email,
         });
+    }
+
+    /// <summary>
+    /// Verify email + password and, on success, return a signed JWT. On any failure
+    /// we return the same 401 with a generic message — never revealing whether it was
+    /// the email or the password that was wrong (that would help credential-stuffing).
+    /// </summary>
+    [HttpPost("login")]
+    public async Task<IActionResult> Login(LoginRequest request)
+    {
+        var email = request.Email.Trim().ToLowerInvariant();
+
+        var user = await _db.Users.SingleOrDefaultAsync(u => u.Email == email);
+        if (user is null)
+        {
+            return Unauthorized(new { message = "Invalid email or password." });
+        }
+
+        // Re-hash the submitted password with the stored hash's salt and compare.
+        // VerifyHashedPassword does this in constant time to avoid timing attacks.
+        var result = _passwordHasher.VerifyHashedPassword(user, user.PasswordHash, request.Password);
+        if (result == PasswordVerificationResult.Failed)
+        {
+            return Unauthorized(new { message = "Invalid email or password." });
+        }
+
+        // Password is correct → mint the token that proves it on later requests.
+        var token = _tokenService.CreateToken(user);
+        return Ok(new AuthResponse { Token = token });
     }
 }
